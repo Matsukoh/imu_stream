@@ -1,0 +1,225 @@
+#!/usr/bin/env python
+# -*- coding:utf-8 -*-
+import rospy
+from geometry_msgs.msg import Twist
+from nav_msgs.msg import Odometry
+from geometry_msgs.msg import TwistStamped,Twist,Vector3,Quaternion
+from sensor_msgs.msg import Imu
+from visualization_msgs.msg import Marker
+import serial
+from datetime import datetime
+from time import sleep
+import numpy as np
+import serial
+import math
+from decimal import Decimal, ROUND_HALF_UP, ROUND_HALF_EVEN
+from tf.transformations import quaternion_from_euler
+
+class ImuDriver:
+  def __init__(self):
+    self.frame_id = rospy.get_param('~frame_id', 'imu_base')
+    self.queue_size = rospy.get_param('~queue_size', 10)
+    self.pub_imu = rospy.Publisher(rospy.get_param('~imu_topic_name', 'imu'), Imu, queue_size=self.queue_size)
+    self.pub_marker_flag = rospy.get_param('~pub_marker', False)
+    if self.pub_marker_flag:
+        self.pub_marker = rospy.Publisher(rospy.get_param('~marker_topic_name', 'imu_marker'), Marker, queue_size=self.queue_size)
+    self.imu_msg = Imu()
+
+    self.pub_rate = rospy.get_param('~pub_rate', 10)
+    
+    # setting data
+    self.sensor_name = rospy.get_param('~sensor_name', 'STEVAL-MKI193V1')
+    baud_rate = rospy.get_param('~baud_rate', 115200) # Set baud rate
+    serial_port = rospy.get_param('~serial_port', '/dev/ttyACM0')
+    self.sr = serial.Serial(serial_port, baud_rate)
+
+    # initialize sensor
+    # self._init_sensor()
+
+    # resolution
+    self.resolution_acc = rospy.get_param('~resolution_acc', 0.061)	# resolution of acceleration
+    self.resolution_angv = rospy.get_param('~resolution_angv', 8.75)		# resolution of angular velocity
+    self.acc_gravity = rospy.get_param('~acc_gravity', 9.80655)	# gravity acceleration
+    #-------------------------------------
+    # Acceleration sensor data
+    self.AX_acc = 0	# Acceleration [m/s^2]
+    self.AY_acc = 0
+    self.AZ_acc = 0
+
+    self.AX_acc_prev = 0	# Acceleration [m/s^2]
+    self.AY_acc_prev = 0
+    self.AZ_acc_prev = 0
+
+    self.AX_ang = 0	# Ground angle [°]
+    self.AY_ang = 0
+    self.AZ_ang = 0
+    #-------------------------------------
+    # Gyroscope data
+    self.GX_acc = 0	# Angular velocity [rad/s]
+    self.GY_acc = 0
+    self.GZ_acc = 0
+
+    self.GX_acc_prev = 0	# Angular velocity [rad/s]
+    self.GY_acc_prev = 0
+    self.GZ_acc_prev = 0
+    #-------------------------------------
+  
+  def init_sensor(self):
+    if (self.sensor_name == 'STEVAL-MKI193V1'):
+      self.sr.write(b"*setdb193v1\n")
+      self.sr.write(b"*Zoff\n")
+      self.sr.write(b"*w1040\n")
+      self.sr.write(b"*w1140\n")
+      self.sr.write(b"*debug\n")
+      # init_return = self.sr.readline()
+    print("IMU driver")
+    print("|----Initialized IMU")
+    # print("|----Init return : " + str(init_return))
+
+  def close_sensor(self):
+    if (self.sensor_name == 'STEVAL-MKI193V1'):
+      self.sr.write(b"*stop\n")
+      self.sr.write(b"*Zon\n")
+      self.sr.write(b"*dbreset\n")
+      self.sr.close()
+
+    print("IMU driver")
+    print("|----Closed IMU")
+  
+  def _split_serial_data(self, serial_data):
+    splited_data = serial_data.decode().strip().strip("\r").strip("\r\n").split("=")
+    return splited_data
+  
+  def _rawData2acc_linear(self, raw_data):
+    acc_buf = (raw_data * self.resolution_acc) / 1000
+    acc_linear = float(acc_buf * self.acc_gravity)
+    # acc_linear = float(acc_buf)
+    return acc_linear
+
+  def _rawData2angle(self):
+    ang_x = float(math.atan2(self.AX_acc, self.AZ_acc))
+    ang_y = float(math.atan2(self.AX_acc, self.AZ_acc))
+    ang_z = float(math.atan2(self.AX_acc, self.AY_acc))
+      
+    return ang_x, ang_y, ang_z
+  
+  def _rawData2acc_angle(self, raw_data):
+    # acc_angle = float(((raw_data * self.resolution_angv) / 1000) / 360)
+    acc_angle = float(raw_data)/1000 * self.resolution_angv * math.pi / 180
+    return acc_angle
+  
+  def _serial_align(self, serial_1, serial_2):
+    if serial_1[0]=='A':
+      serial_A = serial_1
+      serial_G = serial_2
+    else:
+      serial_A = serial_2
+      serial_G = serial_1
+    
+    return serial_A, serial_G
+
+  def _data_processing(self):
+    if (self.sensor_name == 'STEVAL-MKI193V1'):
+      serial_1 = self.sr.readline()
+      serial_2 = self.sr.readline()
+      if (serial_1[0]=='A' and  serial_2[0]=='G') or (serial_1[0]=='G' and serial_2[0]=='A'):
+
+        serial_data_A, serial_data_G = self._serial_align(serial_1, serial_2)
+        # print("serial_data_A : " + str(serial_data_A))
+        # print("serial_data_G : " + str(serial_data_G))
+        raw_data_A, raw_data_G = map(self._split_serial_data, [serial_data_A, serial_data_G])
+
+        if len(raw_data_A) == 4 and len(raw_data_G) == 4:
+          try:
+            raw_data_array_A = [float(raw_data_A[1][0:6]), float(raw_data_A[2][0:6]), float(raw_data_A[3][0:6])]
+            raw_data_array_G = [float(raw_data_G[1][0:6]), float(raw_data_G[2][0:6]), float(raw_data_G[3][0:6])]
+          except ValueError:
+            print("That was no valid number in raw_data_array_A or raw_data_array_G")
+          else:
+            self.AX_acc, self.AY_acc, self.AZ_acc = map(self._rawData2acc_linear, raw_data_array_A)
+            # self.AZ_acc = self.AZ_acc - self.acc_gravity
+            self.AX_ang, self.AY_ang, self.AZ_ang = self._rawData2angle()
+            self.GX_acc,  self.GY_acc,  self.GZ_acc = map(self._rawData2acc_angle, raw_data_array_G)
+        
+        # if len(raw_data_G) == 4:
+        #   try:
+        #     raw_data_array_G = [float(raw_data_G[1][0:6]), float(raw_data_G[2][0:6]), float(raw_data_G[3][0:6])]
+        #   except ValueError:
+        #     print("That was no valid number in raw_data_array_G")
+        #   else:
+        #     self.GX_acc,  self.GY_acc,  self.GZ_acc = map(self._rawData2acc_angle, raw_data_array_G)
+ 
+  def publish_data(self):
+    self._data_processing()
+
+    q = quaternion_from_euler(self.AX_ang, self.AY_ang, self.AZ_ang)
+
+    #---------------------------------------------------------------------------
+    # IMU msg
+    self.imu_msg.orientation.x = q[0]
+    self.imu_msg.orientation.y = q[1]
+    self.imu_msg.orientation.z = q[2]
+    self.imu_msg.orientation.w = q[3]
+
+    self.imu_msg.header.stamp = rospy.get_rostime()				
+    self.imu_msg.header.frame_id = self.frame_id
+    self.imu_msg.linear_acceleration.x = self.AX_acc
+    self.imu_msg.linear_acceleration.y = self.AY_acc
+    self.imu_msg.linear_acceleration.z = self.AZ_acc
+
+    self.imu_msg.angular_velocity.x = self.GX_acc
+    self.imu_msg.angular_velocity.y = self.GY_acc
+    self.imu_msg.angular_velocity.z = self.GZ_acc
+
+    self.pub_imu.publish(self.imu_msg)
+    #---------------------------------------------------------------------------
+    # Marker msg
+    if self.pub_marker_flag:
+      marker_msg = Marker()
+      marker_msg.header.frame_id = self.frame_id
+      marker_msg.header.stamp = rospy.Time.now()
+
+      marker_msg.ns = "Imu orientation"
+      marker_msg.id = 1
+      # marker_msg_1.id = 1
+
+      marker_msg.action = Marker.ADD
+
+      marker_msg.pose.position.x = 0.0
+      marker_msg.pose.position.y = 0.0
+      marker_msg.pose.position.z = 0.0
+
+      marker_msg.pose.orientation.x = q[0]
+      marker_msg.pose.orientation.y = q[1]
+      marker_msg.pose.orientation.z = q[2]
+      marker_msg.pose.orientation.w = q[3]
+
+      marker_msg.color.r = 0.0
+      marker_msg.color.g = 1.0
+      marker_msg.color.b = 0.0
+      marker_msg.color.a = 0.5
+
+      marker_msg.scale.x = 1.0
+      marker_msg.scale.y = 0.1
+      marker_msg.scale.z = 0.1
+
+      marker_msg.lifetime = rospy.Duration()
+
+      marker_msg.type =  Marker.ARROW
+
+      self.pub_marker.publish(marker_msg)
+
+if __name__ == '__main__':
+  rospy.init_node('imu_driver', anonymous=True)
+  node = ImuDriver()
+  node.init_sensor()
+  r = rospy.Rate(node.pub_rate)
+  
+  try:
+    while not rospy.is_shutdown():
+      node.publish_data()
+      r.sleep()
+  except rospy.ROSInterruptException:
+    rospy.loginfo("imu_driver node finished.")
+  finally:
+    node.close_sensor()

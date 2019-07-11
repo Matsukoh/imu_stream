@@ -1,0 +1,22 @@
+<launch>
+    <arg name="world_frame"   value="world_link"/>   
+    <arg name="map_frame"   value="map"/>
+    <arg name="odom_frame"   value="odom"/>
+    <arg name="base_frame"   value="base_footprint"/>
+
+    <node pkg="imu_stream" type="imu_driver" name="imu_driver" output="screen">
+        <param name="frame_id"        value="$(arg base_frame)"/>
+        <param name="queue_size"       value="1" type="int"/>
+        <param name="pub_marker"       value="true" type="bool"/>
+
+        <param name="imu_topic_name"    value="imu"/>
+        <param name="pub_rate"          value="1000"      type="double"/>
+        <param name="sensor_name"       value="STEVAL-MKI193V1"/>
+        <param name="serial_port"       value="/dev/ttyACM0"/>
+
+        <param name="resolution_acc"    value="0.061"   type="double"/>
+        <param name="resolution_angv"   value="8.75"    type="double"/>
+        <param name="acc_gravity"       value="9.80655" type="double"/>
+        
+    </node>
+</launch>
